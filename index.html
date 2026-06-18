@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#0F2F26" />
+<title>Eco-Bill · Digital Bus Ticket</title>
+
+<!-- ============ TAILWIND CSS (CDN) ============ -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- ============ QR CODE GENERATOR (CDN) — used by Conductor Mode ============ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+<!-- ============ QR CODE SCANNER (CDN) — used by Passenger Mode ============ -->
+<script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+<!-- ============ FONTS — signage display face + clean body face + mono "ticket data" face ============ -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+<script>
+  // Extend Tailwind's default theme with our transit / eco-paper-ticket palette and fonts.
+  // This must run AFTER the Tailwind CDN script tag but BEFORE we use the classes below.
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          'transit-green':      '#1B4D3E', // primary brand green (bus livery)
+          'transit-green-dark': '#0F2F26', // app background
+          'eco-lime':           '#8BC53F', // primary CTA / accent
+          'paper':              '#F6F1E4', // ticket stub paper color
+          'paper-line':         '#D8CFB8', // dashed perforation line on paper
+          'ink':                '#14241B', // near-black text on paper
+          'warn-amber':         '#D98E2B', // expiring-soon / warning state
+        },
+        fontFamily: {
+          display: ['"Archivo Black"', 'sans-serif'],
+          body:    ['Inter', 'sans-serif'],
+          mono:    ['"Space Mono"', 'monospace'],
+        }
+      }
+    }
+  }
+</script>
+
+<style>
+  /* ===================================================================
+     SIGNATURE VISUAL ELEMENT: the "ticket stub"
+     A literal paper bus-ticket card: ink-bordered cream paper, a rotated
+     brand spine on the left edge (like a ticket's printed margin), and a
+     dashed "perforation" divider with punched circular notches between
+     the ticket details and the QR stub — mimicking a real tear-off ticket.
+     =================================================================== */
+  body { background-color: #0F2F26; font-family: 'Inter', sans-serif; }
+
+  .ticket-card {
+    background: #F6F1E4;
+    color: #14241B;
+    border: 2px solid #14241B;
+    display: flex;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .ticket-spine {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    background: #1B4D3E;
+    color: #F6F1E4;
+    letter-spacing: 0.2em;
+    flex-shrink: 0;
+  }
+
+  .ticket-perforation {
+    position: relative;
+    border-top: 2px dashed #D8CFB8;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+  }
+  .ticket-perforation::before,
+  .ticket-perforation::after {
+    content: '';
+    position: absolute;
+    top: -13px;
+    width: 24px;
+    height: 24px;
+    border-radius: 9999px;
+    background: #0F2F26; /* matches page background -> looks like a punched hole */
+  }
+  .ticket-perforation::before { left: -28px; }
+  .ticket-perforation::after  { right: -16px; }
+
+  /* Ticket "prints in" when a conductor generates one — like it's being ejected from a printer */
+  @keyframes ticketPrint {
+    from { opacity: 0; transform: translateY(-18px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .animate-ticket-print { animation: ticketPrint 0.55s cubic-bezier(0.2, 0.8, 0.2, 1); }
+
+  /* Wallet list items fade up when rendered */
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fade-in { animation: fadeInUp 0.35s ease-out; }
+
+  /* Pulsing ring around the scanner button while the camera is live */
+  @keyframes pulseRing {
+    0%   { box-shadow: 0 0 0 0 rgba(139, 197, 63, 0.55); }
+    100% { box-shadow: 0 0 0 14px rgba(139, 197, 63, 0); }
+  }
+  .scan-live { animation: pulseRing 1.6s ease-out infinite; }
+
+  /* html5-qrcode injects its own <video>/<canvas> — keep it tidy inside our frame */
+  #qr-reader video, #qr-reader canvas { border-radius: 2px; }
+  #qr-reader__dashboard_section_csr button { display: none !important; } /* hide lib's default file-upload UI, we drive start/stop ourselves */
+
+  ::selection { background: #8BC53F; color: #14241B; }
+</style>
+</head>
+
+<body class="min-h-screen text-paper font-body">
+
+  <!-- ============================== HEADER + ROLE SWITCHER ============================== -->
+  <header class="sticky top-0 z-20 bg-transit-green-dark/95 backdrop-blur border-b border-paper/10">
+    <div class="max-w-md mx-auto px-4 pt-4 pb-3">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h1 class="font-display text-2xl leading-none text-paper">ECO-BILL</h1>
+          <p class="font-mono text-[11px] uppercase tracking-widest text-paper/50 mt-1">Digital Fare · Paperless Transit</p>
+        </div>
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" class="text-eco-lime flex-shrink-0">
+          <rect x="2" y="6" width="20" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M2 11h20" stroke="currentColor" stroke-width="1.6"/>
+          <circle cx="6.5" cy="18" r="1.6" fill="currentColor"/>
+          <circle cx="17.5" cy="18" r="1.6" fill="currentColor"/>
+        </svg>
+      </div>
+
+      <!-- Role Switcher: lets a single tester flip between Conductor and Passenger views -->
+      <div class="flex bg-transit-green/40 rounded-sm p-1 gap-1" role="tablist" aria-label="Role switcher">
+        <button id="btn-role-conductor" onclick="setRole('conductor')"
+          class="flex-1 py-2 text-sm font-semibold uppercase tracking-wide rounded-sm transition-colors"
+          role="tab" aria-selected="true">
+          Conductor Mode
+        </button>
+        <button id="btn-role-passenger" onclick="setRole('passenger')"
+          class="flex-1 py-2 text-sm font-semibold uppercase tracking-wide rounded-sm transition-colors"
+          role="tab" aria-selected="false">
+          Passenger Mode
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-md mx-auto px-4 pt-5 pb-16">
+
+    <!-- ============================== CONDUCTOR MODE ============================== -->
+    <section id="view-conductor">
+
+      <form id="conductor-form" class="bg-transit-green/30 border border-paper/10 rounded-sm p-4 space-y-4">
+        <div>
+          <label for="input-route" class="block text-xs font-mono uppercase tracking-widest text-paper/60 mb-1">Route / Destination</label>
+          <input id="input-route" type="text" required placeholder="e.g. Koramangala → Whitefield"
+            class="w-full bg-paper text-ink placeholder-ink/40 rounded-sm px-3 py-3 font-semibold focus:outline-none focus:ring-2 focus:ring-eco-lime" />
+        </div>
+        <div>
+          <label for="input-price" class="block text-xs font-mono uppercase tracking-widest text-paper/60 mb-1">Fare / Price ($)</label>
+          <input id="input-price" type="number" min="0" step="0.5" required placeholder="e.g. 25"
+            class="w-full bg-paper text-ink placeholder-ink/40 rounded-sm px-3 py-3 font-semibold focus:outline-none focus:ring-2 focus:ring-eco-lime" />
+        </div>
+        <p id="conductor-form-error" class="hidden text-sm text-red-300 font-medium"></p>
+        <button type="submit"
+          class="w-full bg-eco-lime text-ink font-display uppercase tracking-wide text-lg py-4 rounded-sm active:scale-[0.98] transition-transform">
+          Generate Digital Ticket
+        </button>
+      </form>
+
+      <!-- Newly generated ticket renders here as a literal ticket stub -->
+      <div id="conductor-ticket-output" class="mt-6 hidden"></div>
+
+      <!-- Small log of recently issued tickets, reading straight from our "cloud" (localStorage) -->
+      <div class="mt-8">
+        <h2 class="text-xs font-mono uppercase tracking-widest text-paper/50 mb-2">Recently Issued (Master DB)</h2>
+        <div id="conductor-recent-list" class="space-y-1.5 font-mono text-xs"></div>
+      </div>
+    </section>
+
+    <!-- ============================== PASSENGER MODE ============================== -->
+    <section id="view-passenger" class="hidden">
+
+      <div class="bg-transit-green/30 border border-paper/10 rounded-sm p-4">
+        <button id="btn-scan" onclick="toggleScanner()"
+          class="w-full bg-eco-lime text-ink font-display uppercase tracking-wide text-lg py-4 rounded-sm active:scale-[0.98] transition-transform">
+          Scan QR Code
+        </button>
+
+        <!-- Camera viewport for html5-qrcode. Sized by the library once started. -->
+        <div id="qr-reader" class="mt-4 hidden w-full overflow-hidden rounded-sm border-2 border-paper/30"></div>
+
+        <p id="scanner-status" class="hidden mt-3 text-sm font-medium rounded-sm px-3 py-2"></p>
+      </div>
+
+      <div class="mt-8">
+        <div class="flex items-baseline justify-between mb-2">
+          <h2 class="text-xs font-mono uppercase tracking-widest text-paper/50">Your Tickets</h2>
+          <span class="text-[10px] font-mono text-paper/30">auto-clears after 24h</span>
+        </div>
+        <div id="passenger-history-list" class="space-y-4"></div>
+      </div>
+    </section>
+
+    <!-- ============================== FOOTER / DEMO UTILITIES ============================== -->
+    <footer class="mt-12 text-center">
+      <p class="text-[11px] text-paper/30">MVP demo · tickets are simulated in <span class="font-mono">localStorage</span></p>
+      <button onclick="clearDemoData()" class="mt-2 text-[11px] underline text-paper/40 hover:text-paper/70">Clear demo data</button>
+    </footer>
+  </main>
+
+<script>
+/* =====================================================================================
+   ECO-BILL — APPLICATION LOGIC
+   Heavily commented so the QR generation / scanning / storage flow is easy to follow.
+   ===================================================================================== */
+
+/* -------------------------------------------------------------------------------------
+   1. STORAGE ENGINE
+   We simulate a cloud database with two separate localStorage arrays:
+     - ECOBILL_DB_KEY        -> the "master" ledger of every ticket a conductor has issued
+                                 (this represents our backend / cloud database)
+     - ECOBILL_WALLET_KEY    -> the tickets a specific passenger device has scanned & saved
+                                 (this represents that passenger's personal wallet/history)
+   In a real product these would live in a real database and the passenger app would
+   verify tickets against the server. Here, everything lives in the browser.
+------------------------------------------------------------------------------------- */
+const ECOBILL_DB_KEY     = 'ecobill_master_db';
+const ECOBILL_WALLET_KEY = 'ecobill_passenger_wallet';
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+
+// Tracks which role is currently being viewed, and whether the camera scanner is live.
+let currentRole = 'conductor';
+let html5QrCodeInstance = null;
+let isScannerRunning = false;
+
+/* ---- Generic localStorage read/write helpers, each wrapped in try/catch so a
+       corrupted or missing key never crashes the app (defensive error handling). ---- */
+function readArrayFromStorage(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : [];
+  } catch (err) {
+    console.error(`Eco-Bill: failed to read "${key}" from storage`, err);
+    return [];
+  }
+}
+function writeArrayToStorage(key, arr) {
+  try {
+    localStorage.setItem(key, JSON.stringify(arr));
+  } catch (err) {
+    console.error(`Eco-Bill: failed to write "${key}" to storage`, err);
+  }
+}
+
+/* -------------------------------------------------------------------------------------
+   2. UTILITIES — UUID generation, money/time formatting, and the crucial expiry check
+------------------------------------------------------------------------------------- */
+
+// Generates a random ticket ID. Uses the native crypto.randomUUID() where available
+// (all modern browsers), and falls back to a manual RFC4122-style v4 UUID otherwise.
+function generateUUID() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function formatMoney(n) { return Number(n).toFixed(2); }
+
+function formatDateTime(timestamp) {
+  return new Date(timestamp).toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+}
+
+// Turns a millisecond duration into a human label like "23h 41m left".
+function formatTimeRemaining(ms) {
+  if (ms <= 0) return 'Expired';
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  return `${hours}h ${minutes}m left`;
+}
+
+// ****** THE CRUCIAL EXPIRY / "AUTO-VANISH" LOGIC ******
+// Given an array of tickets, returns only the ones that have NOT yet expired.
+// A ticket is expired once Date.now() passes its expiresAt timestamp (issuedAt + 24h).
+// This is called every time we render the passenger's wallet, so expired tickets
+// silently disappear from the list — simulating the 24-hour auto-vanish feature.
+function pruneExpiredTickets(tickets) {
+  const now = Date.now();
+  return tickets.filter((ticket) => ticket.expiresAt > now);
+}
+
+/* -------------------------------------------------------------------------------------
+   3. ROLE SWITCHER
+------------------------------------------------------------------------------------- */
+function setRole(role) {
+  currentRole = role;
+  const isConductor = role === 'conductor';
+
+  document.getElementById('view-conductor').classList.toggle('hidden', !isConductor);
+  document.getElementById('view-passenger').classList.toggle('hidden', isConductor);
+
+  // Style the active/inactive tab buttons
+  const conductorBtn = document.getElementById('btn-role-conductor');
+  const passengerBtn = document.getElementById('btn-role-passenger');
+  const activeClasses = ['bg-eco-lime', 'text-ink'];
+  const inactiveClasses = ['text-paper/60'];
+
+  conductorBtn.classList.remove(...activeClasses, ...inactiveClasses);
+  passengerBtn.classList.remove(...activeClasses, ...inactiveClasses);
+  conductorBtn.classList.add(...(isConductor ? activeClasses : inactiveClasses));
+  passengerBtn.classList.add(...(isConductor ? inactiveClasses : activeClasses));
+  conductorBtn.setAttribute('aria-selected', isConductor);
+  passengerBtn.setAttribute('aria-selected', !isConductor);
+
+  if (isConductor) {
+    // Leaving Passenger Mode — make sure the camera is released.
+    stopScanner();
+    renderRecentlyIssued();
+  } else {
+    renderPassengerWallet();
+  }
+}
+
+/* -------------------------------------------------------------------------------------
+   4. CONDUCTOR MODE — generate a ticket + render its QR code
+------------------------------------------------------------------------------------- */
+document.getElementById('conductor-form').addEventListener('submit', function (e) {
+  e.preventDefault(); // stop the page from reloading on submit
+
+  const routeInput = document.getElementById('input-route');
+  const priceInput = document.getElementById('input-price');
+  const errorEl = document.getElementById('conductor-form-error');
+
+  const route = routeInput.value.trim();
+  const price = parseFloat(priceInput.value);
+
+  // Basic validation with inline error handling (no disruptive browser alert)
+  if (!route || isNaN(price) || price <= 0) {
+    errorEl.textContent = 'Please enter a valid route and a fare greater than $0.';
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  errorEl.classList.add('hidden');
+
+  // ----- Build the Ticket Object per the required schema -----
+  const issuedAt = Date.now();
+  const ticket = {
+    id: generateUUID(),
+    route: route,
+    price: price,
+    issuedAt: issuedAt,
+    expiresAt: issuedAt + TWENTY_FOUR_HOURS_MS,
+  };
+
+  // Save it into our "master database" (localStorage array of all issued tickets)
+  const db = readArrayFromStorage(ECOBILL_DB_KEY);
+  db.unshift(ticket); // newest first
+  writeArrayToStorage(ECOBILL_DB_KEY, db);
+
+  renderConductorTicket(ticket);
+  renderRecentlyIssued();
+  this.reset();
+});
+
+function renderConductorTicket(ticket) {
+  const outputEl = document.getElementById('conductor-ticket-output');
+
+  // Build the ticket-stub markup (our signature visual element)
+  outputEl.innerHTML = `
+    <div class="ticket-card rounded-sm animate-ticket-print">
+      <div class="ticket-spine px-2 py-4 flex items-center justify-center">
+        <span class="font-mono text-[11px] font-bold uppercase">Eco · Bill Digital Fare</span>
+      </div>
+      <div class="flex-1 p-4 min-w-0">
+        <p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Bus Ticket</p>
+        <h3 class="font-display text-xl leading-tight mt-1 break-words">${escapeHtml(ticket.route)}</h3>
+        <p class="font-mono text-3xl font-bold mt-2">$${formatMoney(ticket.price)}</p>
+
+        <div class="ticket-perforation grid grid-cols-2 gap-2 text-[11px] font-mono">
+          <div><span class="text-ink/50 block">Issued</span>${formatDateTime(ticket.issuedAt)}</div>
+          <div><span class="text-ink/50 block">Expires</span>${formatDateTime(ticket.expiresAt)}</div>
+        </div>
+
+        <div class="flex items-center gap-4 mt-4">
+          <div id="qrcode-target" class="bg-paper p-2 border border-ink/20 rounded-sm flex-shrink-0"></div>
+          <div class="min-w-0">
+            <p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Serial</p>
+            <p class="font-mono text-[11px] break-all">${ticket.id}</p>
+            <p class="text-[11px] text-ink/60 mt-2">Passenger scans this code in Passenger Mode to save the ticket.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  outputEl.classList.remove('hidden');
+
+  // ----- QR GENERATION (QRCode.js) -----
+  // The QR encodes a JSON string containing only the fields a passenger's phone needs
+  // to identify and store the ticket: its ID, route, and price.
+  const qrPayload = JSON.stringify({
+    id: ticket.id,
+    route: ticket.route,
+    price: ticket.price,
+  });
+
+  const qrTargetEl = document.getElementById('qrcode-target');
+  // new QRCode(domElement, options) renders directly into the given element.
+  // correctLevel 'H' gives the highest error-correction, so the code still scans
+  // even if partially obscured (helpful for a phone screen held up on a moving bus).
+  new QRCode(qrTargetEl, {
+    text: qrPayload,
+    width: 132,
+    height: 132,
+    colorDark: '#14241B',
+    colorLight: '#F6F1E4',
+    correctLevel: QRCode.CorrectLevel.H,
+  });
+}
+
+function renderRecentlyIssued() {
+  const listEl = document.getElementById('conductor-recent-list');
+  const db = readArrayFromStorage(ECOBILL_DB_KEY).slice(0, 5);
+
+  if (db.length === 0) {
+    listEl.innerHTML = `<p class="text-paper/40">No tickets issued yet.</p>`;
+    return;
+  }
+
+  listEl.innerHTML = db.map((t) => `
+    <div class="flex justify-between bg-transit-green/20 rounded-sm px-3 py-2">
+      <span class="text-paper/70 truncate pr-2">${escapeHtml(t.route)}</span>
+      <span class="text-eco-lime flex-shrink-0">$${formatMoney(t.price)}</span>
+    </div>
+  `).join('');
+}
+
+/* -------------------------------------------------------------------------------------
+   5. PASSENGER MODE — QR scanning via html5-qrcode
+------------------------------------------------------------------------------------- */
+
+function toggleScanner() {
+  if (isScannerRunning) {
+    stopScanner();
+  } else {
+    startScanner();
+  }
+}
+
+async function startScanner() {
+  const statusEl = document.getElementById('scanner-status');
+  const readerEl = document.getElementById('qr-reader');
+  const btn = document.getElementById('btn-scan');
+
+  hideStatus();
+  readerEl.classList.remove('hidden');
+
+  try {
+    // Html5Qrcode takes the id of the element it should render the camera feed into.
+    html5QrCodeInstance = new Html5Qrcode('qr-reader');
+
+    // .start(cameraConfig, scanConfig, onSuccessCallback, onErrorCallback) opens the
+    // device camera (rear camera via facingMode: "environment") and begins scanning.
+    await html5QrCodeInstance.start(
+      { facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 230, height: 230 } },
+      onScanSuccess,
+      onScanFrameFailure // called continuously while no QR is in frame — we ignore it
+    );
+
+    isScannerRunning = true;
+    btn.textContent = 'Stop Scanning';
+    btn.classList.add('scan-live');
+  } catch (err) {
+    // ----- ERROR HANDLING: camera permission denied / no camera / insecure context -----
+    readerEl.classList.add('hidden');
+    console.error('Eco-Bill: camera start failed', err);
+
+    const message = String(err).toLowerCase();
+    if (message.includes('notallowederror') || message.includes('permission')) {
+      showStatus('Camera permission denied. Please allow camera access in your browser settings and try again.', 'red');
+    } else if (message.includes('notfounderror')) {
+      showStatus('No camera was found on this device.', 'red');
+    } else {
+      showStatus('Could not start the camera. Make sure you are on HTTPS (or localhost) and try again.', 'red');
+    }
+  }
+}
+
+// Per-frame "no QR detected" callback. html5-qrcode calls this very frequently while
+// scanning, so we deliberately do nothing here rather than showing an error every frame.
+function onScanFrameFailure(_errorMessage) { /* intentionally empty */ }
+
+async function stopScanner() {
+  const readerEl = document.getElementById('qr-reader');
+  const btn = document.getElementById('btn-scan');
+
+  if (html5QrCodeInstance && isScannerRunning) {
+    try {
+      await html5QrCodeInstance.stop();   // turns off the camera stream
+      await html5QrCodeInstance.clear();  // removes the rendered video/canvas elements
+    } catch (err) {
+      console.warn('Eco-Bill: error while stopping scanner', err);
+    }
+  }
+  isScannerRunning = false;
+  readerEl.classList.add('hidden');
+  btn.textContent = 'Scan QR Code';
+  btn.classList.remove('scan-live');
+}
+
+// Fired once html5-qrcode successfully decodes a QR code.
+async function onScanSuccess(decodedText) {
+  await stopScanner(); // stop the camera immediately so we don't double-trigger on the same code
+
+  try {
+    const data = JSON.parse(decodedText);
+
+    // Validate the payload actually looks like an Eco-Bill ticket before trusting it.
+    if (!data.id || !data.route || typeof data.price === 'undefined') {
+      throw new Error('Missing required ticket fields');
+    }
+
+    const wallet = readArrayFromStorage(ECOBILL_WALLET_KEY);
+
+    // Don't save the same ticket twice if it's scanned again.
+    if (wallet.some((t) => t.id === data.id)) {
+      showStatus('This ticket is already in your wallet.', 'amber');
+      renderPassengerWallet();
+      return;
+    }
+
+    // NOTE on issuedAt/expiresAt: per the spec, the QR payload only carries
+    // { id, route, price } — it does NOT carry the conductor's original issuedAt
+    // timestamp. So the passenger's device stamps its own issuedAt at the moment
+    // of scanning, and the 24-hour expiry window is calculated from there.
+    const issuedAt = Date.now();
+    const ticket = {
+      id: data.id,
+      route: data.route,
+      price: data.price,
+      issuedAt: issuedAt,
+      expiresAt: issuedAt + TWENTY_FOUR_HOURS_MS,
+    };
+
+    wallet.unshift(ticket);
+    writeArrayToStorage(ECOBILL_WALLET_KEY, wallet);
+
+    alert('Ticket Saved!');
+    renderPassengerWallet();
+  } catch (err) {
+    // ----- ERROR HANDLING: scanned code wasn't a valid Eco-Bill ticket -----
+    console.error('Eco-Bill: invalid QR payload', err);
+    showStatus('Invalid ticket QR code. Please scan a valid Eco-Bill ticket.', 'red');
+  }
+}
+
+function showStatus(message, tone) {
+  const el = document.getElementById('scanner-status');
+  const palette = {
+    red:   'bg-red-900/40 text-red-200 border border-red-500/30',
+    amber: 'bg-warn-amber/20 text-warn-amber border border-warn-amber/30',
+    green: 'bg-eco-lime/15 text-eco-lime border border-eco-lime/30',
+  };
+  el.className = `mt-3 text-sm font-medium rounded-sm px-3 py-2 ${palette[tone] || palette.red}`;
+  el.textContent = message;
+  el.classList.remove('hidden');
+}
+function hideStatus() {
+  document.getElementById('scanner-status').classList.add('hidden');
+}
+
+/* -------------------------------------------------------------------------------------
+   6. PASSENGER WALLET RENDERING (with the 24h auto-vanish expiry check applied)
+------------------------------------------------------------------------------------- */
+function renderPassengerWallet() {
+  const listEl = document.getElementById('passenger-history-list');
+
+  // Read the saved wallet, then prune anything past its expiresAt timestamp.
+  const rawWallet = readArrayFromStorage(ECOBILL_WALLET_KEY);
+  const activeWallet = pruneExpiredTickets(rawWallet);
+
+  // If pruning actually removed something, persist the cleaned-up list so expired
+  // tickets don't linger in storage either (true "auto-vanish", not just visual).
+  if (activeWallet.length !== rawWallet.length) {
+    writeArrayToStorage(ECOBILL_WALLET_KEY, activeWallet);
+  }
+
+  if (activeWallet.length === 0) {
+    listEl.innerHTML = `
+      <div class="border border-dashed border-paper/20 rounded-sm p-6 text-center text-paper/40 text-sm">
+        No active tickets. Scan one from your conductor to get rolling.
+      </div>`;
+    return;
+  }
+
+  const now = Date.now();
+  listEl.innerHTML = activeWallet.map((t) => {
+    const remainingMs = t.expiresAt - now;
+    const isExpiringSoon = remainingMs < 60 * 60 * 1000; // less than 1 hour left
+    const badgeClasses = isExpiringSoon
+      ? 'bg-warn-amber/20 text-warn-amber border-warn-amber/30'
+      : 'bg-eco-lime/15 text-eco-lime border-eco-lime/30';
+    const badgeLabel = isExpiringSoon ? 'EXPIRING SOON' : 'ACTIVE';
+
+    return `
+      <div class="ticket-card rounded-sm animate-fade-in">
+        <div class="ticket-spine px-1.5 py-3 flex items-center justify-center">
+          <span class="font-mono text-[9px] font-bold uppercase">Eco · Bill</span>
+        </div>
+        <div class="flex-1 p-3 min-w-0">
+          <div class="flex items-center justify-between gap-2">
+            <h3 class="font-display text-base leading-tight truncate">${escapeHtml(t.route)}</h3>
+            <span class="text-[9px] font-mono uppercase tracking-wide border rounded-full px-2 py-0.5 flex-shrink-0 ${badgeClasses}">${badgeLabel}</span>
+          </div>
+          <div class="flex items-baseline justify-between mt-1.5">
+            <span class="font-mono text-xl font-bold">$${formatMoney(t.price)}</span>
+            <span class="font-mono text-[11px] text-ink/60">${formatTimeRemaining(remainingMs)}</span>
+          </div>
+          <p class="font-mono text-[10px] text-ink/40 mt-1 truncate">#${t.id}</p>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+/* -------------------------------------------------------------------------------------
+   7. LIVE REFRESH — re-check expiry & countdown every 15s while Passenger Mode is open,
+      so the 24h auto-vanish behavior (and the "time remaining" labels) stay accurate
+      without requiring the user to manually refresh.
+------------------------------------------------------------------------------------- */
+setInterval(() => {
+  if (currentRole === 'passenger') renderPassengerWallet();
+}, 15000);
+
+/* -------------------------------------------------------------------------------------
+   8. MISC HELPERS + DEMO RESET
+------------------------------------------------------------------------------------- */
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function clearDemoData() {
+  if (confirm('Clear all demo tickets from both Conductor and Passenger storage?')) {
+    localStorage.removeItem(ECOBILL_DB_KEY);
+    localStorage.removeItem(ECOBILL_WALLET_KEY);
+    location.reload();
+  }
+}
+
+/* -------------------------------------------------------------------------------------
+   9. INITIAL RENDER
+------------------------------------------------------------------------------------- */
+setRole('conductor');
+</script>
+</body>
+</html>
